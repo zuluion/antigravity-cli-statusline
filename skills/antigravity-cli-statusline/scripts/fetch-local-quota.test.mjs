@@ -136,15 +136,19 @@ async function testHttpEndpointAndEnvDiscovery() {
   const origToken = process.env.ANTIGRAVITY_CSRF_TOKEN;
 
   try {
-    // 1. Direct requestUserStatus test over HTTP
-    const status = await requestUserStatus(port, 'test-token-123', '127.0.0.1');
-    assert.strictEqual(status.userStatus.email, 'test@example.com');
+    // 1. Direct requestUserStatus test over HTTP (with preferHttps=false fast path)
+    const statusFast = await requestUserStatus(port, 'test-token-123', '127.0.0.1', false);
+    assert.strictEqual(statusFast.userStatus.email, 'test@example.com');
 
-    // 2. Direct requestQuotaSummary test over HTTP
-    const summary = await requestQuotaSummary(port, 'test-token-123', '127.0.0.1');
+    // 2. Direct requestUserStatus test with preferHttps=true (fallback from HTTPS to HTTP)
+    const statusFallback = await requestUserStatus(port, 'test-token-123', '127.0.0.1', true);
+    assert.strictEqual(statusFallback.userStatus.email, 'test@example.com');
+
+    // 3. Direct requestQuotaSummary test over HTTP
+    const summary = await requestQuotaSummary(port, 'test-token-123', '127.0.0.1', false);
     assert.ok(summary.groups.length > 0);
 
-    // 3. fetchLiveQuotaCache via ANTIGRAVITY_LS_ADDRESS and ANTIGRAVITY_CSRF_TOKEN
+    // 4. fetchLiveQuotaCache via ANTIGRAVITY_LS_ADDRESS and ANTIGRAVITY_CSRF_TOKEN
     process.env.ANTIGRAVITY_LS_ADDRESS = `127.0.0.1:${port}`;
     process.env.ANTIGRAVITY_CSRF_TOKEN = 'test-token-123';
 
@@ -154,7 +158,14 @@ async function testHttpEndpointAndEnvDiscovery() {
     assert.strictEqual(cache.planTier, 'Pro');
     assert.ok(cache.weekly.gemini);
     assert.strictEqual(cache.weekly.gemini.remaining_percentage, 90);
-    console.log("✅ HTTP endpoint and env discovery tests passed.");
+
+    // 5. fetchLiveQuotaCache recovery when env vars are absent (via ENV_CACHE_FILE)
+    delete process.env.ANTIGRAVITY_LS_ADDRESS;
+    delete process.env.ANTIGRAVITY_CSRF_TOKEN;
+    const cacheRecovered = await fetchLiveQuotaCache();
+    assert.ok(cacheRecovered, "Cache should be generated from persisted env file");
+    assert.strictEqual(cacheRecovered.email, 'test@example.com');
+    console.log("✅ HTTP endpoint, env discovery, and persistence tests passed.");
   } finally {
     if (origLs !== undefined) process.env.ANTIGRAVITY_LS_ADDRESS = origLs;
     else delete process.env.ANTIGRAVITY_LS_ADDRESS;

@@ -7,6 +7,7 @@ import os from 'os';
 import { pathToFileURL, fileURLToPath } from 'url';
 
 const CACHE_FILE = join(os.homedir(), '.gemini', 'tmp', 'real_quota_cache.json');
+const ENV_CACHE_FILE = join(os.homedir(), '.gemini', 'tmp', 'antigravity_ls_env.json');
 
 function formatResetTime(resetTimeStr) {
   try {
@@ -190,14 +191,19 @@ function requestRpc(host, port, csrfToken, rpcPath, useHttps = false) {
   });
 }
 
-function requestService(host, port, csrfToken, rpcPath) {
-  return requestRpc(host, port, csrfToken, rpcPath, false).catch(() => {
-    return requestRpc(host, port, csrfToken, rpcPath, true);
+function requestService(host, port, csrfToken, rpcPath, preferHttps = true) {
+  return requestRpc(host, port, csrfToken, rpcPath, preferHttps).catch((err) => {
+    // 若伺服器已完成 TLS/HTTP 握手並回傳 HTTP 狀態碼錯誤（如 401/404/400），
+    // 說明該協定已握手成功，不可切換協定。對 Go TLS 監聽端口發送明文 HTTP 會觸發終端握手錯誤。
+    if (err.message && err.message.startsWith('HTTP ')) {
+      throw err;
+    }
+    return requestRpc(host, port, csrfToken, rpcPath, !preferHttps);
   });
 }
 
-export function requestUserStatus(port, csrfToken, host = '127.0.0.1') {
-  return requestService(host, port, csrfToken, '/exa.language_server_pb.LanguageServerService/GetUserStatus');
+export function requestUserStatus(port, csrfToken, host = '127.0.0.1', preferHttps = true) {
+  return requestService(host, port, csrfToken, '/exa.language_server_pb.LanguageServerService/GetUserStatus', preferHttps);
 }
 
 /**
@@ -205,10 +211,11 @@ export function requestUserStatus(port, csrfToken, host = '127.0.0.1') {
  * @param {number} port - The port number of the active language server.
  * @param {string} csrfToken - The CSRF token for request authentication.
  * @param {string} [host='127.0.0.1'] - The host of the active language server.
+ * @param {boolean} [preferHttps=true] - Whether to try HTTPS first before falling back to HTTP.
  * @returns {Promise<object>} A promise resolving to the parsed response JSON object.
  */
-export function requestQuotaSummary(port, csrfToken, host = '127.0.0.1') {
-  return requestService(host, port, csrfToken, '/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary');
+export function requestQuotaSummary(port, csrfToken, host = '127.0.0.1', preferHttps = true) {
+  return requestService(host, port, csrfToken, '/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary', preferHttps);
 }
 
 /**
@@ -369,17 +376,38 @@ export async function fetchLiveQuotaCache() {
   };
 
   // 1. 優先使用 Antigravity CLI 注入的環境變數 (極速直連，零進程開銷)
-  const envLsAddr = process.env.ANTIGRAVITY_LS_ADDRESS;
-  const envCsrfToken = process.env.ANTIGRAVITY_CSRF_TOKEN || '';
+  let envLsAddr = process.env.ANTIGRAVITY_LS_ADDRESS;
+  let envCsrfToken = process.env.ANTIGRAVITY_CSRF_TOKEN || '';
+
+  // 若 statusLine.command 等子進程環境未繼承環境變數，從最新會話快取中載入
+  if (!envLsAddr || !envCsrfToken) {
+    try {
+      const savedEnv = JSON.parse(readFileSync(ENV_CACHE_FILE, 'utf8'));
+      if (!envLsAddr && savedEnv.ls_address) envLsAddr = savedEnv.ls_address;
+      if (!envCsrfToken && savedEnv.csrf_token) envCsrfToken = savedEnv.csrf_token;
+    } catch (_) {}
+  } else {
+    // 將有效的直連位址與 Token 持久化，供後續未獲取環境變數的 Hook 子進程共用
+    try {
+      mkdirSync(dirname(ENV_CACHE_FILE), { recursive: true });
+      writeFileSyncAndVerifyNoBOM(ENV_CACHE_FILE, JSON.stringify({
+        ls_address: envLsAddr,
+        csrf_token: envCsrfToken,
+        updatedAt: Date.now()
+      }, null, 2));
+    } catch (_) {}
+  }
+
   if (envLsAddr) {
     try {
       const [host, portStr] = envLsAddr.split(':');
       const port = parseInt(portStr, 10);
       if (!isNaN(port)) {
-        const response = await requestUserStatus(port, envCsrfToken, host);
+        // ANTIGRAVITY_LS_ADDRESS 為 HTTP 協定，直接以 HTTP 快路徑連線
+        const response = await requestUserStatus(port, envCsrfToken, host, false);
         let summaryResponse = null;
         try {
-          summaryResponse = await requestQuotaSummary(port, envCsrfToken, host);
+          summaryResponse = await requestQuotaSummary(port, envCsrfToken, host, false);
         } catch (_) {}
         processStatusAndSummary(response, summaryResponse);
       }
@@ -394,10 +422,11 @@ export async function fetchLiveQuotaCache() {
       for (const port of ports) {
         try {
           const token = info.csrf_token || envCsrfToken;
-          const response = await requestUserStatus(port, token, '127.0.0.1');
+          // 未知掃描端口優先使用 HTTPS，避免對 Go TLS Listener 發送明文 HTTP 觸發終端報錯
+          const response = await requestUserStatus(port, token, '127.0.0.1', true);
           let summaryResponse = null;
           try {
-            summaryResponse = await requestQuotaSummary(port, token, '127.0.0.1');
+            summaryResponse = await requestQuotaSummary(port, token, '127.0.0.1', true);
           } catch (_) {}
           processStatusAndSummary(response, summaryResponse);
         } catch (_) {
