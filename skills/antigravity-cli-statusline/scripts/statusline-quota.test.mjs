@@ -286,6 +286,59 @@ async function main() {
       try { rmSync(homeR5, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } catch(e) {}
     }
 
+    // ----------------------------------------------------
+    // Test Case R6: Direct meta.quota integration (Native CLI quota, zero disk dependency)
+    // ----------------------------------------------------
+    console.log("\n[Test R6] Verifying native meta.quota rendering and persistence...");
+    const settingsR6 = {
+      ui: {
+        language: "us",
+        footer: {
+          items: ["quota", "quota-reset-countdown", "quota-weekly", "quota-weekly-countdown"]
+        }
+      }
+    };
+    const metaR6 = {
+      model: { display_name: "Gemini 3.8 Flash (High)" },
+      quota: {
+        "gemini-5h": {
+          remaining_fraction: 0.75,
+          reset_in_seconds: 7200
+        },
+        "gemini-weekly": {
+          remaining_fraction: 0.82,
+          reset_in_seconds: 360000
+        }
+      },
+      plan_tier: "Google AI Pro",
+      email: "test@example.com",
+      terminal_width: 160
+    };
+
+    const homeR6 = makeTempHome({}, settingsR6);
+    try {
+      const resR6 = await runStatusline(metaR6, homeR6);
+      console.log("R6 Output:", JSON.stringify(resR6.stdout));
+
+      const expectedR6Hourly = `${WHITE}Hourly Available:${RESET} ${BLUE_BOLD}75%${RESET}`;
+      const expectedR6HourlyReset = `${WHITE}Hourly Reset:${RESET} ${BLUE_BOLD}2h${RESET}`;
+      const expectedR6Weekly = `${WHITE}Weekly Available:${RESET} ${BLUE_BOLD}82%${RESET}`;
+      const expectedR6WeeklyReset = `${WHITE}Weekly Reset:${RESET} ${BLUE_BOLD}4d 4h${RESET}`;
+
+      if (resR6.code === 0 && 
+          resR6.stdout.includes(expectedR6Hourly) && 
+          resR6.stdout.includes(expectedR6HourlyReset) &&
+          resR6.stdout.includes(expectedR6Weekly) &&
+          resR6.stdout.includes(expectedR6WeeklyReset)) {
+        console.log("✅ R6 passed!");
+      } else {
+        console.error(`❌ R6 failed! Output did not contain expected values.`);
+        testsPassed = false;
+      }
+    } finally {
+      try { rmSync(homeR6, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } catch(e) {}
+    }
+
   } catch (err) {
     console.error("Test execution failed:", err);
     testsPassed = false;

@@ -81,6 +81,9 @@ function testParseWeeklyBucketsWrappedAndCamelCase() {
 }
 
 import http from 'http';
+import fs from 'fs';
+import os from 'os';
+import path, { join } from 'path';
 import { requestUserStatus, requestQuotaSummary, fetchLiveQuotaCache } from './fetch-local-quota.mjs';
 
 async function testHttpEndpointAndEnvDiscovery() {
@@ -165,7 +168,17 @@ async function testHttpEndpointAndEnvDiscovery() {
     const cacheRecovered = await fetchLiveQuotaCache();
     assert.ok(cacheRecovered, "Cache should be generated from persisted env file");
     assert.strictEqual(cacheRecovered.email, 'test@example.com');
-    console.log("✅ HTTP endpoint, env discovery, and persistence tests passed.");
+
+    // 6. Invalidation of dead session ENV_CACHE_FILE
+    const envCachePath = join(os.homedir(), '.gemini', 'tmp', 'antigravity_ls_env.json');
+    fs.writeFileSync(envCachePath, JSON.stringify({
+      ls_address: '127.0.0.1:1', // deliberately dead port
+      csrf_token: 'dead-token-123'
+    }), 'utf8');
+
+    await fetchLiveQuotaCache();
+    assert.strictEqual(fs.existsSync(envCachePath), false, "Dead ENV_CACHE_FILE should be unlinked on connection failure");
+    console.log("✅ HTTP endpoint, env discovery, persistence, and stale cache invalidation tests passed.");
   } finally {
     if (origLs !== undefined) process.env.ANTIGRAVITY_LS_ADDRESS = origLs;
     else delete process.env.ANTIGRAVITY_LS_ADDRESS;

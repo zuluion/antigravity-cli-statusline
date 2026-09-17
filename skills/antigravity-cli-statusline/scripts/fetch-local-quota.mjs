@@ -1,5 +1,5 @@
 import { spawnSync, execSync } from 'child_process';
-import { writeFileSync, mkdirSync, readFileSync } from 'fs';
+import { writeFileSync, mkdirSync, readFileSync, unlinkSync } from 'fs';
 import path, { dirname, join } from 'path';
 import http from 'http';
 import https from 'https';
@@ -378,12 +378,16 @@ export async function fetchLiveQuotaCache() {
   // 1. 優先使用 Antigravity CLI 注入的環境變數 (極速直連，零進程開銷)
   let envLsAddr = process.env.ANTIGRAVITY_LS_ADDRESS;
   let envCsrfToken = process.env.ANTIGRAVITY_CSRF_TOKEN || '';
+  let envLoadedFromDisk = false;
 
   // 若 statusLine.command 等子進程環境未繼承環境變數，從最新會話快取中載入
   if (!envLsAddr || !envCsrfToken) {
     try {
       const savedEnv = JSON.parse(readFileSync(ENV_CACHE_FILE, 'utf8'));
-      if (!envLsAddr && savedEnv.ls_address) envLsAddr = savedEnv.ls_address;
+      if (!envLsAddr && savedEnv.ls_address) {
+        envLsAddr = savedEnv.ls_address;
+        envLoadedFromDisk = true;
+      }
       if (!envCsrfToken && savedEnv.csrf_token) envCsrfToken = savedEnv.csrf_token;
     } catch (_) {}
   } else {
@@ -411,7 +415,13 @@ export async function fetchLiveQuotaCache() {
         } catch (_) {}
         processStatusAndSummary(response, summaryResponse);
       }
-    } catch (_) {}
+    } catch (_) {
+      // 若從磁碟快取載入的連線位址失效（舊會話已終止），清除過期的 token 與快取檔案
+      if (envLoadedFromDisk) {
+        envCsrfToken = process.env.ANTIGRAVITY_CSRF_TOKEN || '';
+        try { unlinkSync(ENV_CACHE_FILE); } catch (_) {}
+      }
+    }
   }
 
   // 2. 若環境變數通道未獲取到資料，降級回進程掃描（向下相容舊版或獨立 IDE）
